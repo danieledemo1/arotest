@@ -212,6 +212,6 @@ resource "azurerm_role_assignment" "image_registry_vnet" {
 resource "azurerm_role_assignment" "aro_rp_vnet" {
   scope              = azurerm_virtual_network.aro.id
   role_definition_id = local.role.aro_rp_vnet
-  principal_id       = data.azuread_service_principal.aro_rp.object_id
+  principal_id       = "10ff0b4f-37ee-4c7b-859e-e1425c4ba660" //data.azuread_service_principal.aro_rp.object_id
   principal_type     = "ServicePrincipal"
 }
