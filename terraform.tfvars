@@ -11,7 +11,7 @@ domain = "myarotest"
 # ---------------------------------------------------------------------------
 
 location            = "italynorth"
-resource_group_name = "test-aro-identity"
+resource_group_name = "test-aro-identity-cluster-rg"
 
 # ---------------------------------------------------------------------------
 # Cluster
