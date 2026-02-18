@@ -1,0 +1,435 @@
+# ============================================================================
+# Terraform — Azure Red Hat OpenShift (ARO) Cluster
+#
+# Workflow overview
+# ─────────────────
+#   pull_request → main   :  validate → plan  (plan posted as PR comment)
+#   push         → main   :  validate → plan → apply  (if changes detected)
+#   workflow_dispatch      :  validate → plan           (action: plan)
+#                             validate → plan → apply   (action: apply)
+#                             validate         → destroy (action: destroy)
+#
+# Authentication
+# ──────────────
+# OIDC (Workload Identity Federation) — no long-lived secrets required.
+# The azurerm backend and provider both use ARM_USE_OIDC=true, which
+# picks up the OIDC token issued to this workflow automatically.
+#
+# Required GitHub Actions Variables  (Settings → Secrets and variables → Actions → Variables)
+#   ARM_CLIENT_ID               App registration / managed identity client ID
+#   ARM_TENANT_ID               Azure AD tenant ID
+#   ARM_SUBSCRIPTION_ID         Target Azure subscription ID
+#   TF_BACKEND_RESOURCE_GROUP   Resource group containing the tfstate storage account
+#   TF_BACKEND_STORAGE_ACCOUNT  Storage account name
+#   TF_BACKEND_CONTAINER        Blob container name (e.g. tfstate)
+#   TF_BACKEND_KEY              State file path    (e.g. aro/terraform.tfstate)
+#   TF_VAR_DOMAIN               ARO cluster domain prefix
+#   TF_VAR_LOCATION             Azure region        (default: eastus)
+#   TF_VAR_RESOURCE_GROUP_NAME  ARO resource group  (default: aro-rg)
+#   TF_VAR_CLUSTER_NAME         ARO cluster name    (default: aro-cluster)
+#   TF_VAR_ARO_VERSION          OpenShift version   (default: 4.15.35)
+#
+# Required GitHub Actions Secrets   (Settings → Secrets and variables → Actions → Secrets)
+#   TF_VAR_PULL_SECRET          Red Hat pull secret JSON string (optional)
+#
+# Required GitHub Environments      (Settings → Environments)
+#   production          — protects the apply job  (add required reviewers)
+#   production-destroy  — protects the destroy job (add required reviewers)
+# ============================================================================
+
+name: "Terraform — ARO Cluster"
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "**.tf"
+      - "**.tfvars"
+      - ".github/workflows/terraform.yml"
+
+  pull_request:
+    branches: ["main"]
+    paths:
+      - "**.tf"
+      - "**.tfvars"
+      - ".github/workflows/terraform.yml"
+
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "Terraform action to run"
+        required: true
+        default: "plan"
+        type: choice
+        options:
+          - plan
+          - apply
+          - destroy
+
+# Cancel in-progress runs for the same ref so stale PR plan comments are
+# not left open.  Allow concurrent runs on different branches/PRs.
+concurrency:
+  group: "terraform-${{ github.ref }}"
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# OIDC token exchange requires id-token: write.
+# pull-requests: write is needed to post and update plan comments.
+permissions:
+  id-token: write
+  contents: read
+  pull-requests: write
+
+# ---------------------------------------------------------------------------
+# Shared environment variables
+# ---------------------------------------------------------------------------
+env:
+  TF_VERSION: "1.9.5"
+  WORKING_DIR: "."
+
+  # ── Azure OIDC authentication ──────────────────────────────────────────
+  # These are not secrets — they identify the app registration, not authorise it.
+  ARM_CLIENT_ID:       ${{ vars.ARM_CLIENT_ID }}
+  ARM_TENANT_ID:       ${{ vars.ARM_TENANT_ID }}
+  ARM_SUBSCRIPTION_ID: ${{ vars.ARM_SUBSCRIPTION_ID }}
+  ARM_USE_OIDC:        "true"
+
+# ============================================================================
+# Jobs
+# ============================================================================
+jobs:
+
+  # --------------------------------------------------------------------------
+  # 1. VALIDATE
+  #    Runs on every trigger.  Checks formatting and validates HCL syntax
+  #    without connecting to the backend (no Azure credentials required).
+  # --------------------------------------------------------------------------
+  validate:
+    name: "Validate"
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@v4
+
+      - name: "Setup Terraform ${{ env.TF_VERSION }}"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # Non-blocking: produces a workflow warning, does not fail the job.
+      - name: "Terraform Format Check"
+        id: fmt
+        run: terraform fmt -check -recursive -no-color
+        working-directory: ${{ env.WORKING_DIR }}
+        continue-on-error: true
+
+      - name: "Format Warning"
+        if: steps.fmt.outcome == 'failure'
+        run: echo "::warning::terraform fmt check failed. Run 'terraform fmt -recursive' locally to fix formatting."
+
+      # Init without a backend so that validate can run offline.
+      - name: "Terraform Init (no backend)"
+        run: terraform init -backend=false -no-color
+        working-directory: ${{ env.WORKING_DIR }}
+
+      - name: "Terraform Validate"
+        run: terraform validate -no-color
+        working-directory: ${{ env.WORKING_DIR }}
+
+  # --------------------------------------------------------------------------
+  # 2. PLAN
+  #    Runs after validate on all triggers except workflow_dispatch destroy.
+  #    Saves the plan binary as an artifact for the apply job to consume.
+  #    On pull_request events, posts the plan output as a PR comment.
+  # --------------------------------------------------------------------------
+  plan:
+    name: "Plan"
+    runs-on: ubuntu-latest
+    needs: validate
+
+    # Skip this job when the operator chose to destroy the cluster.
+    if: "!(github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy')"
+
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+
+    outputs:
+      # exitcode semantics: 0 = no changes, 1 = error, 2 = changes pending
+      exitcode: ${{ steps.plan.outputs.exitcode }}
+
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@v4
+
+      # terraform_wrapper: true enables steps.plan.outputs.{stdout,exitcode}
+      - name: "Setup Terraform ${{ env.TF_VERSION }}"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: true
+
+      - name: "Azure Login — OIDC"
+        uses: azure/login@v2
+        with:
+          client-id:       ${{ vars.ARM_CLIENT_ID }}
+          tenant-id:       ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+
+      # Partial backend configuration — all values supplied at init time so
+      # no sensitive data is hard-coded in backend.tf.
+      - name: "Terraform Init"
+        id: init
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TF_BACKEND_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TF_BACKEND_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TF_BACKEND_CONTAINER }}" \
+            -backend-config="key=${{ vars.TF_BACKEND_KEY }}" \
+            -backend-config="use_oidc=true" \
+            -no-color
+
+      # -detailed-exitcode:  2 = changes, 0 = no changes, 1 = error
+      # continue-on-error:   allow the PR comment step to run even on failure
+      - name: "Terraform Plan"
+        id: plan
+        run: |
+          terraform plan \
+            -out=tfplan \
+            -detailed-exitcode \
+            -input=false \
+            -no-color
+        env:
+          TF_VAR_domain:               ${{ vars.TF_VAR_DOMAIN }}
+          TF_VAR_location:             ${{ vars.TF_VAR_LOCATION }}
+          TF_VAR_resource_group_name:  ${{ vars.TF_VAR_RESOURCE_GROUP_NAME }}
+          TF_VAR_cluster_name:         ${{ vars.TF_VAR_CLUSTER_NAME }}
+          TF_VAR_aro_version:          ${{ vars.TF_VAR_ARO_VERSION }}
+          TF_VAR_pull_secret:          ${{ secrets.TF_VAR_PULL_SECRET }}
+        continue-on-error: true
+
+      # Upload plan binary only when changes are detected (exitcode 2).
+      # The artifact name is scoped to the commit SHA so apply jobs on
+      # different commits never download a stale plan.
+      - name: "Upload Plan Artifact"
+        if: steps.plan.outputs.exitcode == '2'
+        uses: actions/upload-artifact@v4
+        with:
+          name: "tfplan-${{ github.sha }}"
+          path: "${{ env.WORKING_DIR }}/tfplan"
+          retention-days: 5
+          if-no-files-found: error
+
+      # Post (or update) a plan summary comment on the pull request.
+      - name: "Post Plan Comment to PR"
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          PLAN_STDOUT:   ${{ steps.plan.outputs.stdout }}
+          PLAN_EXITCODE: ${{ steps.plan.outputs.exitcode }}
+          INIT_OUTCOME:  ${{ steps.init.outcome }}
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            // GitHub comment body size limit is ~65 536 chars.
+            const MAX_PLAN_LENGTH = 50000;
+            let planText  = process.env.PLAN_STDOUT || '(no output)';
+            const truncated = planText.length > MAX_PLAN_LENGTH;
+            if (truncated) planText = planText.slice(0, MAX_PLAN_LENGTH);
+
+            const exitcode = process.env.PLAN_EXITCODE;
+            const planBadge =
+              exitcode === '0' ? '✅ No changes — infrastructure is up to date.' :
+              exitcode === '2' ? '📋 Changes detected — review before merging.' :
+                                 '❌ Plan failed — see output below.';
+
+            const initBadge = process.env.INIT_OUTCOME === 'success' ? '✅' : '❌';
+
+            const body = [
+              '## Terraform Plan',
+              '',
+              '| Step | Result |',
+              '|------|--------|',
+              `| **Init** | ${initBadge} |`,
+              `| **Plan** | ${planBadge} |`,
+              '',
+              '<details>',
+              '<summary>Show full plan output</summary>',
+              '',
+              '```',
+              planText + (truncated ? '\n\n... output truncated (> 50 000 chars) ...' : ''),
+              '```',
+              '',
+              '</details>',
+              '',
+              `> Triggered by **@${{ github.actor }}** · commit \`${{ github.sha }}\``,
+            ].join('\n');
+
+            // Update an existing bot comment rather than creating a new one
+            // on every push to the PR branch.
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo:  context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body.startsWith('## Terraform Plan')
+            );
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner:      context.repo.owner,
+                repo:       context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner:        context.repo.owner,
+                repo:         context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      # Propagate the plan error so the workflow status is correctly marked
+      # as failed when plan itself fails (as opposed to "no changes").
+      - name: "Fail on Plan Error"
+        if: steps.plan.outputs.exitcode == '1'
+        run: |
+          echo "::error::Terraform plan failed. Review the output above."
+          exit 1
+
+  # --------------------------------------------------------------------------
+  # 3. APPLY
+  #    Runs only when:
+  #      • a push reaches main AND plan detected changes (exitcode 2), OR
+  #      • the operator manually triggers workflow_dispatch with action=apply.
+  #    Protected by the 'production' GitHub Environment — add required
+  #    reviewers there to enforce a manual approval gate before apply.
+  # --------------------------------------------------------------------------
+  apply:
+    name: "Apply"
+    runs-on: ubuntu-latest
+    needs: plan
+
+    if: |
+      needs.plan.outputs.exitcode == '2' &&
+      (
+        (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+        (github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'apply')
+      )
+
+    environment: production
+
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@v4
+
+      - name: "Setup Terraform ${{ env.TF_VERSION }}"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: "Azure Login — OIDC"
+        uses: azure/login@v2
+        with:
+          client-id:       ${{ vars.ARM_CLIENT_ID }}
+          tenant-id:       ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+
+      - name: "Terraform Init"
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TF_BACKEND_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TF_BACKEND_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TF_BACKEND_CONTAINER }}" \
+            -backend-config="key=${{ vars.TF_BACKEND_KEY }}" \
+            -backend-config="use_oidc=true" \
+            -no-color
+
+      # Download the exact plan binary produced by the plan job.
+      - name: "Download Plan Artifact"
+        uses: actions/download-artifact@v4
+        with:
+          name: "tfplan-${{ github.sha }}"
+          path: "${{ env.WORKING_DIR }}"
+
+      - name: "Terraform Apply"
+        run: |
+          terraform apply \
+            -auto-approve \
+            -input=false \
+            -no-color \
+            tfplan
+        env:
+          # pull_secret is the only variable not in the saved plan file;
+          # all other vars are baked into the plan binary.
+          TF_VAR_pull_secret: ${{ secrets.TF_VAR_PULL_SECRET }}
+
+  # --------------------------------------------------------------------------
+  # 4. DESTROY
+  #    Only triggered manually via workflow_dispatch with action=destroy.
+  #    Protected by the 'production-destroy' GitHub Environment.
+  #    Runs a fresh plan+destroy (no artifact) to ensure state is current.
+  # --------------------------------------------------------------------------
+  destroy:
+    name: "Destroy"
+    runs-on: ubuntu-latest
+    needs: validate
+
+    if: "github.event_name == 'workflow_dispatch' && github.event.inputs.action == 'destroy'"
+
+    environment: production-destroy
+
+    defaults:
+      run:
+        working-directory: ${{ env.WORKING_DIR }}
+
+    steps:
+      - name: "Checkout repository"
+        uses: actions/checkout@v4
+
+      - name: "Setup Terraform ${{ env.TF_VERSION }}"
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: "Azure Login — OIDC"
+        uses: azure/login@v2
+        with:
+          client-id:       ${{ vars.ARM_CLIENT_ID }}
+          tenant-id:       ${{ vars.ARM_TENANT_ID }}
+          subscription-id: ${{ vars.ARM_SUBSCRIPTION_ID }}
+
+      - name: "Terraform Init"
+        run: |
+          terraform init \
+            -backend-config="resource_group_name=${{ vars.TF_BACKEND_RESOURCE_GROUP }}" \
+            -backend-config="storage_account_name=${{ vars.TF_BACKEND_STORAGE_ACCOUNT }}" \
+            -backend-config="container_name=${{ vars.TF_BACKEND_CONTAINER }}" \
+            -backend-config="key=${{ vars.TF_BACKEND_KEY }}" \
+            -backend-config="use_oidc=true" \
+            -no-color
+
+      - name: "Terraform Destroy"
+        run: |
+          terraform destroy \
+            -auto-approve \
+            -input=false \
+            -no-color
+        env:
+          TF_VAR_domain:               ${{ vars.TF_VAR_DOMAIN }}
+          TF_VAR_location:             ${{ vars.TF_VAR_LOCATION }}
+          TF_VAR_resource_group_name:  ${{ vars.TF_VAR_RESOURCE_GROUP_NAME }}
+          TF_VAR_cluster_name:         ${{ vars.TF_VAR_CLUSTER_NAME }}
+          TF_VAR_aro_version:          ${{ vars.TF_VAR_ARO_VERSION }}
+          TF_VAR_pull_secret:          ${{ secrets.TF_VAR_PULL_SECRET }}
