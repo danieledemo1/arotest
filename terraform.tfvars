@@ -4,21 +4,21 @@
 
 # Short domain prefix used in DNS names and the managed resource group name.
 # Only lowercase alphanumeric characters and hyphens are allowed.
-domain = "myaro"
+domain = "myarotest"
 
 # ---------------------------------------------------------------------------
 # Core
 # ---------------------------------------------------------------------------
 
-location            = "eastus"
-resource_group_name = "aro-rg"
+location            = "italynorth"
+resource_group_name = "test-aro-identity"
 
 # ---------------------------------------------------------------------------
 # Cluster
 # ---------------------------------------------------------------------------
 
 cluster_name = "aro-cluster"
-aro_version  = "4.15.35"
+aro_version  = "4.19.20"
 
 # Uncomment and paste your pull-secret.txt content here (as a single-line JSON string)
 # to enable access to Red Hat container registries and OperatorHub.
@@ -38,8 +38,8 @@ service_cidr         = "172.30.0.0/16"
 # Compute
 # ---------------------------------------------------------------------------
 
-master_vm_size      = "Standard_D8s_v3"
-worker_vm_size      = "Standard_D4s_v3"
+master_vm_size      = "Standard_D8s_v5"
+worker_vm_size      = "Standard_D4s_v5"
 worker_count        = 3
 worker_disk_size_gb = 128
 
