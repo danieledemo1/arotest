@@ -26,6 +26,15 @@ resource "azurerm_subnet" "master" {
 
   # Private link policies must be disabled on the master subnet for ARO.
   private_link_service_network_policies_enabled = false
+
+  # ARO adds a delegation (Microsoft.RedHatOpenShift/openShiftClusters) to
+  # both subnets after cluster creation.  Ignoring this attribute prevents
+  # Terraform from trying to remove the delegation on subsequent applies,
+  # which would force a subnet recreate that is blocked while the cluster
+  # is deployed.
+  lifecycle {
+    ignore_changes = [delegation]
+  }
 }
 
 resource "azurerm_subnet" "worker" {
@@ -35,4 +44,9 @@ resource "azurerm_subnet" "worker" {
   address_prefixes     = [var.worker_subnet_prefix]
 
   service_endpoints = ["Microsoft.ContainerRegistry"]
+
+  # See master subnet comment — same ARO delegation applies here.
+  lifecycle {
+    ignore_changes = [delegation]
+  }
 }

@@ -78,6 +78,10 @@ The managed-identity deployment model requires the `platformWorkloadIdentityProf
 
 After initial provisioning, the ARO control plane may modify certain cluster properties (e.g. worker profile count during auto-scaling). The `ignore_changes = [body]` lifecycle rule prevents Terraform from treating these drift events as configuration changes that require re-apply.
 
+### Subnet delegation drift — `ignore_changes = [delegation]`
+
+After the ARO cluster is created, the control plane adds a `Microsoft.RedHatOpenShift/openShiftClusters` delegation to both the master and worker subnets. Because this delegation is not declared in the Terraform configuration, Terraform detects drift on every plan and attempts to remove it by recreating the subnets. The recreation is blocked by Azure because the cluster is deployed in those subnets, which also cascades into a forced recreation of every role assignment scoped to the subnets. Adding `lifecycle { ignore_changes = [delegation] }` on both subnet resources prevents this conflict.
+
 ### Role assignment dependency ordering
 
 All twenty role assignments are listed in the `depends_on` block of the cluster resource. The ARO RP validates networking and identity permissions during cluster creation; if any assignment is missing the deployment will fail. Explicit `depends_on` ensures Terraform does not start the cluster create until all RBAC is in place.
