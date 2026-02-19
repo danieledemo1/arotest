@@ -33,7 +33,7 @@ resource "azurerm_subnet" "master" {
   # which would force a subnet recreate that is blocked while the cluster
   # is deployed.
   lifecycle {
-    ignore_changes = [delegation]
+    ignore_changes = [delegation, default_outbound_access_enabled]
   }
 }
 
@@ -47,6 +47,6 @@ resource "azurerm_subnet" "worker" {
 
   # See master subnet comment — same ARO delegation applies here.
   lifecycle {
-    ignore_changes = [delegation]
+    ignore_changes = [delegation, default_outbound_access_enabled]
   }
 }
