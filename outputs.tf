@@ -1,3 +1,8 @@
+locals {
+  # Convenience handle for the decoded cluster response body.
+  aro_cluster_out = try(jsondecode(azapi_resource.aro_cluster.output), {})
+}
+
 output "resource_group_name" {
   description = "Resource group that contains the ARO cluster resource."
   value       = azurerm_resource_group.aro.name
@@ -41,6 +46,20 @@ output "aro_version" {
 output "managed_resource_group" {
   description = "Name of the ARO-managed infrastructure resource group (contains cluster VMs, LBs, etc.)."
   value       = "aro-${var.domain}-${var.location}"
+}
+
+output "oidc_issuer_url" {
+  description = "OIDC issuer URL for the cluster (use as the issuer when creating federated credentials for managed identities)."
+  value = try(
+    coalesce(
+      local.aro_cluster_out.properties.platformWorkloadIdentityProfile.oidcIssuerProfile.issuerUrl,
+      local.aro_cluster_out.properties.platformWorkloadIdentityProfile.oidcIssuerProfile.issuerURL,
+      local.aro_cluster_out.properties.platformWorkloadIdentityProfile.oidcIssuerUrl,
+      local.aro_cluster_out.properties.oidcIssuerProfile.issuerUrl,
+      local.aro_cluster_out.properties.oidcIssuerProfile.issuerURL
+    ),
+    null
+  )
 }
 
 # ---------------------------------------------------------------------------
