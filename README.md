@@ -31,6 +31,7 @@ az provider register -n Microsoft.Authorization --wait
 
 ```
 aroTest/
+├── backend.tf           # Remote state backend (partial azurerm config; values passed at init time)
 ├── main.tf              # Provider configuration, resource group, data sources
 ├── variables.tf         # All input variables with descriptions and validation
 ├── terraform.tfvars     # Variable values — edit this file before deploying
@@ -45,6 +46,7 @@ aroTest/
 
 | File | Resources |
 |---|---|
+| `backend.tf` | `azurerm` backend (partial config supplied via `terraform init -backend-config` flags) |
 | `main.tf` | `azurerm_resource_group`, provider blocks, `data.azurerm_client_config`, `data.azuread_service_principal` (ARO RP) |
 | `variables.tf` | All input variables with type constraints and validation rules |
 | `terraform.tfvars` | Default values for all variables |
@@ -129,7 +131,7 @@ The ARO first-party service principal (`"Azure Red Hat OpenShift RP"`) is looked
 | Variable | Type | Default | Required | Description |
 |---|---|---|---|---|
 | `domain` | `string` | — | **yes** | Short prefix used in DNS hostnames and the managed resource group name |
-| `location` | `string` | `eastus` | no | Azure region |
+| `location` | `string` | `italynorth` | no | Azure region |
 | `resource_group_name` | `string` | `aro-rg` | no | Resource group name |
 | `cluster_name` | `string` | `aro-cluster` | no | ARO cluster name |
 | `aro_version` | `string` | `4.15.35` | no | OpenShift version to deploy |
@@ -148,6 +150,22 @@ The ARO first-party service principal (`"Azure Red Hat OpenShift RP"`) is looked
 | `fips_validated_modules` | `string` | `Disabled` | no | `Enabled` or `Disabled` |
 | `master_encryption_at_host` | `string` | `Disabled` | no | `Enabled` or `Disabled` |
 | `worker_encryption_at_host` | `string` | `Disabled` | no | `Enabled` or `Disabled` |
+
+Current sample values in [terraform.tfvars](terraform.tfvars):
+
+| Variable | Value |
+|---|---|
+| `domain` | `myarotest` |
+| `location` | `italynorth` |
+| `resource_group_name` | `test-aro-identity-cluster-rg` |
+| `cluster_name` | `aro-cluster` |
+| `aro_version` | `4.19.20` |
+| `master_vm_size` | `Standard_D8s_v5` |
+| `worker_vm_size` | `Standard_D4s_v5` |
+| `worker_count` | `3` |
+| `worker_disk_size_gb` | `128` |
+| `api_server_visibility` | `Public` |
+| `ingress_visibility` | `Public` |
 
 ---
 
@@ -258,6 +276,7 @@ terraform output api_server_url
 | `ingress_ip` | Public IP of the ingress router |
 | `aro_version` | Deployed OpenShift version |
 | `managed_resource_group` | Name of the ARO-managed infrastructure resource group |
+| `oidc_issuer_url` | Cluster OIDC issuer URL (use when creating federated credentials for managed identities) |
 | `cluster_identity_client_id` | Client ID of the `aro-cluster` managed identity |
 | `cluster_identity_principal_id` | Principal ID of the `aro-cluster` managed identity |
 
