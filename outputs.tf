@@ -50,16 +50,7 @@ output "managed_resource_group" {
 
 output "oidc_issuer_url" {
   description = "OIDC issuer URL for the cluster (use as the issuer when creating federated credentials for managed identities)."
-  value = try(
-    coalesce(
-      local.aro_cluster_out.properties.platformWorkloadIdentityProfile.oidcIssuerProfile.issuerUrl,
-      local.aro_cluster_out.properties.platformWorkloadIdentityProfile.oidcIssuerProfile.issuerURL,
-      local.aro_cluster_out.properties.platformWorkloadIdentityProfile.oidcIssuerUrl,
-      local.aro_cluster_out.properties.oidcIssuerProfile.issuerUrl,
-      local.aro_cluster_out.properties.oidcIssuerProfile.issuerURL
-    ),
-    null
-  )
+  value       = try(local.aro_cluster_out.properties.clusterProfile.oidcIssuer, null)
 }
 
 # ---------------------------------------------------------------------------
